@@ -1,0 +1,13 @@
+[Unit]
+Description=Bridge Wayland text clipboard to VMware through X11/XWayland
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wl-paste --type text --watch %h/.local/bin/vmware-wayland-clipboard
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

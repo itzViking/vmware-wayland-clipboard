@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -u
+
+runtime="${XDG_RUNTIME_DIR:-/tmp}"
+state="$runtime/vmware-wayland-clipboard.state"
+lock="$runtime/vmware-wayland-clipboard.lock"
+window_ms="${VMWARE_WAYLAND_CLIPBOARD_DEDUP_MS:-2000}"
+
+exec 9>"$lock"
+flock 9
+
+tmp=$(mktemp "$runtime/vmware-wayland-clipboard.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+cat > "$tmp"
+
+hash=$(sha256sum "$tmp" | awk '{print $1}')
+now=$(date +%s%3N)
+
+oldhash=""
+oldtime=0
+
+if [[ -r "$state" ]]; then
+    read -r oldhash oldtime < "$state" || true
+fi
+
+# Ignore an immediate reflection of the clipboard we just pushed
+# through X11/XWayland.
+if [[ "$hash" == "$oldhash" ]] && (( now - oldtime < window_ms )); then
+    exit 0
+fi
+
+printf '%s %s\n' "$hash" "$now" > "$state"
+
+# Important: xclip daemonizes and inherits open file descriptors.
+# Drop our serialization lock before launching it.
+flock -u 9
+exec 9>&-
+
+xclip -selection clipboard -in "$tmp"
