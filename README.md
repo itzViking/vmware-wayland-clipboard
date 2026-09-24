@@ -1,140 +1,142 @@
 # VMware Wayland Clipboard Bridge
 
-Workaround for guest-to-host text clipboard synchronization in VMware Linux
-guests running a Wayland desktop.
+A small workaround for guest-to-host text clipboard synchronization in VMware Linux guests running KDE Plasma on Wayland.
 
-Tested with:
+## Problem
+
+On some VMware Workstation Linux guests running Wayland, clipboard integration is asymmetric:
+
+```text
+Windows host -> Linux guest     works
+Linux guest -> Windows host     does not
+```
+
+`vmware-user` can see the X11/XWayland clipboard, while text copied by native Wayland applications may not reach it.
+
+This project bridges normal Wayland text clipboard updates into X11 so VMware can forward them to the host.
+
+It also avoids two issues found during testing:
+
+- Wayland/XWayland clipboard feedback loops
+- breaking Dolphin file copy/cut operations by treating file clipboard data as plain text
+
+Dolphin file transfers are detected and left untouched.
+
+## Tested environment
 
 - Windows 11 host
 - VMware Workstation 26H1u1
 - Fedora 44 KDE Plasma guest
-- Wayland session
-- open-vm-tools 13.1.0
-- XWayland enabled
-
-## Problem
-
-With a Wayland guest, VMware clipboard integration may work from host to guest
-but fail from guest to host.
-
-`vmware-user` still interacts with the X11/XWayland clipboard. Native Wayland
-applications therefore may not make their clipboard contents visible to VMware.
-
-Manually running:
-
-    wl-paste | xclip -selection clipboard
-
-makes the current Wayland clipboard available through X11 and consequently to
-the VMware host.
-
-Using `wl-paste --watch` with `xclip` directly can cause clipboard feedback
-between Wayland and XWayland, so this workaround adds duplicate suppression.
+- Wayland
+- `open-vm-tools`
+- `open-vm-tools-desktop`
+- XWayland
 
 ## How it works
 
-The bridge follows this path:
+For normal text:
 
-    Wayland application
-        |
-        v
-    wl-paste --watch
-        |
-        v
-    duplicate/reflection suppression
-        |
-        v
-    xclip / X11 clipboard
-        |
-        v
-    vmware-user
-        |
-        v
-    VMware host clipboard
+```text
+Wayland clipboard
+      |
+      v
+wl-paste --watch
+      |
+      v
+helper script
+      |
+      v
+xclip / X11 clipboard
+      |
+      v
+vmware-user
+      |
+      v
+Windows clipboard
+```
 
-The helper hashes clipboard contents and suppresses an immediate reflected copy
-for a short period.
+The helper suppresses immediate reflected clipboard updates so it does not react to its own changes.
 
-An important implementation detail is that `xclip` daemonizes so it can remain
-the X11 clipboard owner. The helper therefore releases its `flock` file
-descriptor before launching `xclip`. Otherwise the background xclip process can
-inherit the lock and block subsequent clipboard updates.
+For Dolphin file copy/cut operations, the helper detects KDE file-transfer MIME types such as:
+
+```text
+text/uri-list
+application/x-kde4-urilist
+application/vnd.portal.filetransfer
+application/x-kde-source-id
+```
+
+and ignores the event, allowing Dolphin to handle file operations normally.
+
+This project only bridges text. It does not attempt to transfer files through VMware.
 
 ## Requirements
 
 On Fedora:
 
-    sudo dnf install wl-clipboard xclip
+```bash
+sudo dnf install wl-clipboard xclip util-linux coreutils
+```
 
-The guest must also have VMware desktop integration installed and running,
-normally through:
+VMware guest tools should also be installed:
 
-    open-vm-tools
-    open-vm-tools-desktop
+```bash
+sudo dnf install open-vm-tools open-vm-tools-desktop
+```
 
-XWayland must be available because this workaround deliberately bridges the
-Wayland clipboard into the X11 clipboard used by VMware.
+The session must be running Wayland with XWayland available.
 
-## Installation
+## Install
 
-Copy the helper:
+Clone the repository and run the installer:
 
-    mkdir -p ~/.local/bin
-    install -m 755 bin/vmware-wayland-clipboard \
-        ~/.local/bin/vmware-wayland-clipboard
+```bash
+git clone https://github.com/itzViking/vmware-wayland-clipboard.git
+cd vmware-wayland-clipboard
+./install.sh
+```
 
-Install the user service:
+`install.sh`:
 
-    mkdir -p ~/.config/systemd/user
-    install -m 644 systemd/user/vmware-wayland-clipboard.service \
-        ~/.config/systemd/user/
+- checks the required commands
+- installs the helper to `~/.local/bin/`
+- installs the systemd user service to `~/.config/systemd/user/`
+- enables and starts the service
 
-Reload and enable it:
+Check status with:
 
-    systemctl --user daemon-reload
-    systemctl --user enable --now vmware-wayland-clipboard.service
+```bash
+systemctl --user status vmware-wayland-clipboard.service
+```
 
-Check status:
+## Uninstall
 
-    systemctl --user status vmware-wayland-clipboard.service
+From the repository directory:
 
-## Troubleshooting
+```bash
+./uninstall.sh
+```
 
-Verify Wayland clipboard monitoring:
-
-    wl-paste --type text --watch sh -c 'cat > /tmp/wlwatch'
-
-Verify the one-shot Wayland to X11 bridge:
-
-    wl-paste | xclip -selection clipboard
-
-Verify the X11 clipboard:
-
-    xclip -selection clipboard -out
-
-Check processes:
-
-    pgrep -af 'wl-paste|xclip|vmware-wayland-clipboard'
+This stops and disables the user service, removes the installed helper and service file, and clears the runtime state files.
 
 ## Limitations
 
-This is a workaround, not native VMware Wayland clipboard support.
+This is a compatibility workaround, not native VMware Wayland clipboard support.
 
-Currently it is intended for:
+It currently targets:
 
-- text clipboard data
-- guest-to-host synchronization
-- Wayland sessions with XWayland available
+- guest-to-host text clipboard synchronization
+- KDE Plasma on Wayland
+- VMware using the X11/XWayland clipboard path
 
-It does not implement file copy, drag-and-drop, images, or arbitrary clipboard
-MIME types.
+It does not bridge:
 
-## Upstream
+- files
+- images
+- drag and drop
+- arbitrary clipboard MIME formats
 
-The underlying Wayland clipboard limitation is tracked in the open-vm-tools
-issue tracker, including:
-
-- vmware/open-vm-tools#792
-- vmware/open-vm-tools#443
+Dolphin file copy/cut operations are intentionally ignored so they continue to work normally inside the guest.
 
 ## License
 

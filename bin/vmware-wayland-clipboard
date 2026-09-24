@@ -12,7 +12,26 @@ flock 9
 tmp=$(mktemp "$runtime/vmware-wayland-clipboard.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
+# wl-paste --watch sends the selected clipboard representation to stdin.
 cat > "$tmp"
+
+# Preserve Dolphin/KDE file copy and cut operations.
+#
+# Dolphin advertises copied files as text/uri-list together with one or more
+# KDE/portal-specific MIME types. If we republish that payload through xclip as
+# plain text, the native file-copy semantics are lost and Dolphin may try to
+# paste the URI/filename as text instead of copying the file.
+#
+# Require text/uri-list plus at least one KDE/portal marker so ordinary text
+# clipboard entries are still bridged.
+clipboard_types="$(wl-paste --list-types 2>/dev/null || true)"
+
+if grep -Fxq 'text/uri-list' <<< "$clipboard_types" &&
+   grep -Eq \
+       '^(application/x-kde4-urilist|application/vnd\.portal\.filetransfer|application/x-kde-source-id)$' \
+       <<< "$clipboard_types"; then
+    exit 0
+fi
 
 hash=$(sha256sum "$tmp" | awk '{print $1}')
 now=$(date +%s%3N)
@@ -24,16 +43,18 @@ if [[ -r "$state" ]]; then
     read -r oldhash oldtime < "$state" || true
 fi
 
-# Ignore an immediate reflection of the clipboard we just pushed
-# through X11/XWayland.
+# KWin/XWayland may reflect the clipboard we just pushed into X11 back into
+# Wayland. Ignore an identical value if it comes back within the de-duplication
+# window, otherwise wl-paste --watch can react to its own update.
 if [[ "$hash" == "$oldhash" ]] && (( now - oldtime < window_ms )); then
     exit 0
 fi
 
 printf '%s %s\n' "$hash" "$now" > "$state"
 
-# Important: xclip daemonizes and inherits open file descriptors.
-# Drop our serialization lock before launching it.
+# xclip daemonizes so it can remain the X11 clipboard owner. Release and close
+# our lock first, otherwise the background xclip process inherits FD 9 and can
+# keep the lock indefinitely, blocking later clipboard updates.
 flock -u 9
 exec 9>&-
 
